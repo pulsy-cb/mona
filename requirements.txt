@@ -1,0 +1,20 @@
+# Core dependencies
+pandas
+pyarrow
+numpy
+
+# ML dependencies
+gymnasium
+stable-baselines3[extra]
+torch
+
+# MT5 integration (Windows only, optional)
+# MetaTrader5
+
+# Development
+pytest
+tqdm
+
+# Optional: for visualization
+# matplotlib
+# tensorboard
