@@ -8,25 +8,37 @@
 #property version   "1.00"
 #property strict
 
-//--- Input Parameters
-input group "═══ Direction de Trading ═══"
-input ENUM_DIRECTION TradeDirection = BOTH; // Direction de trading
-enum ENUM_DIRECTION { LONG_ONLY, SHORT_ONLY, BOTH };
+//--- Enum declarations (MUST be before inputs)
+enum ENUM_DIRECTION 
+{ 
+    LONG_ONLY = 0,    // Long Only
+    SHORT_ONLY = 1,   // Short Only
+    BOTH = 2          // Both
+};
 
-input group "═══ Bollinger Bands ═══"
+enum ENUM_BB_STRATEGY 
+{ 
+    SELL_ABOVE_BUY_BELOW = 0,  // Sell Above Buy Below
+    BUY_ABOVE_SELL_BELOW = 1   // Buy Above Sell Below
+};
+
+//--- Input Parameters
+input string Sep1 = "═══ Direction de Trading ═══"; // ═══════════════
+input ENUM_DIRECTION TradeDirection = BOTH; // Direction de trading
+
+input string Sep2 = "═══ Bollinger Bands ═══"; // ═══════════════
 input ENUM_BB_STRATEGY BBStrategy = SELL_ABOVE_BUY_BELOW; // Stratégie BB
-enum ENUM_BB_STRATEGY { SELL_ABOVE_BUY_BELOW, BUY_ABOVE_SELL_BELOW };
 input int BBPeriod = 20;           // Période BB
 input double BBDeviation = 2.0;    // Déviation BB
 input ENUM_APPLIED_PRICE BBSource = PRICE_CLOSE; // Source de prix
 
-input group "═══ Trailing Stop ═══"
+input string Sep3 = "═══ Trailing Stop ═══"; // ═══════════════
 input int StopLossPoints = 300;        // Stop Loss Initial (Points)
 input bool UseTrailingStop = true;     // Activer Trailing Stop
 input int TrailActivation = 200;       // Activation après X points
 input int TrailOffset = 100;           // Distance du Suivi (points)
 
-input group "═══ Trading Settings ═══"
+input string Sep4 = "═══ Trading Settings ═══"; // ═══════════════
 input double LotSize = 0.01;       // Taille du lot
 input int MagicNumber = 12345;     // Magic Number
 input int Slippage = 10;           // Slippage maximum
@@ -158,12 +170,13 @@ bool CheckOpenPosition()
 {
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
-        if(PositionSelectByTicket(PositionGetTicket(i)))
+        ulong ticket = PositionGetTicket(i);
+        if(ticket > 0 && PositionSelectByTicket(ticket))
         {
             if(PositionGetInteger(POSITION_MAGIC) == MagicNumber &&
                PositionGetString(POSITION_SYMBOL) == _Symbol)
             {
-                currentTicket = PositionGetTicket(i);
+                currentTicket = ticket;
                 return true;
             }
         }
@@ -368,15 +381,5 @@ bool ClosePosition(string reason)
     }
     
     return false;
-}
-
-//+------------------------------------------------------------------+
-//| Get position P&L for logging                                       |
-//+------------------------------------------------------------------+
-double GetPositionPnL()
-{
-    if(PositionSelectByTicket(currentTicket))
-        return PositionGetDouble(POSITION_PROFIT);
-    return 0;
 }
 //+------------------------------------------------------------------+

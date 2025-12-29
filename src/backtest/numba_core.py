@@ -4,15 +4,15 @@ import numpy as np
 from numba import njit
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def simulate_trades_fast(
-    bids: np.ndarray,
-    asks: np.ndarray,
-    tick_times: np.ndarray,  # int64, seconds since epoch
+    bids: np.ndarray,           # float32 or float64
+    asks: np.ndarray,           # float32 or float64
+    tick_times: np.ndarray,     # int64, seconds since epoch
     candle_end_times: np.ndarray,  # int64, seconds since epoch
-    long_signals: np.ndarray,  # bool
+    long_signals: np.ndarray,   # bool
     short_signals: np.ndarray,  # bool
-    bb_upper: np.ndarray,
+    bb_upper: np.ndarray,       # float64
     sl_distance: float,
     trail_activation: float,
     trail_offset: float,
@@ -161,13 +161,13 @@ def simulate_trades_fast(
     )
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def compute_bollinger_fast(
     closes: np.ndarray,
     period: int,
     deviation: float
 ) -> tuple:
-    """Compute Bollinger Bands with Numba."""
+    """Compute Bollinger Bands with Numba (accepts float32 or float64)."""
     n = len(closes)
     bb_middle = np.full(n, np.nan)
     bb_upper = np.full(n, np.nan)
@@ -193,13 +193,13 @@ def compute_bollinger_fast(
     return bb_upper, bb_middle, bb_lower
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def build_candles_fast(
     timestamps: np.ndarray,  # int64 seconds
-    mids: np.ndarray,
+    mids: np.ndarray,        # float32 or float64
     timeframe_seconds: int
 ) -> tuple:
-    """Build OHLC candles from tick data with Numba."""
+    """Build OHLC candles from tick data with Numba (memory efficient)."""
     n = len(timestamps)
     
     # First pass: count unique candles

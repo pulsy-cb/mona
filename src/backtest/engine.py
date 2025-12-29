@@ -50,16 +50,17 @@ class BacktestEngine:
         
         logger.info(f"Running Numba-optimized backtest on {n_ticks:,} ticks...")
         
-        # Pre-compute mid prices
-        mids = (arrays.bids + arrays.asks) / 2
+        # Use Bid prices for candles to match MT5 behavior (standard indicators usually on Bid)
+        # float32 -> float64 for precision
+        price_source = arrays.bids.astype(np.float64)
         
-        # Convert timestamps to int64 seconds
-        tick_times = arrays.timestamps.astype('datetime64[s]').astype(np.int64)
+        # Timestamps already in int64 seconds from the loader
+        tick_times = arrays.timestamps
         
         # Build OHLC candles (Numba)
-        logger.info("Building OHLC candles (Numba)...")
+        logger.info("Building OHLC candles (Numba) from Bids...")
         opens, highs, lows, closes, candle_end_times = build_candles_fast(
-            tick_times, mids, self.timeframe_seconds
+            tick_times, price_source, self.timeframe_seconds
         )
         n_candles = len(closes)
         logger.info(f"Built {n_candles:,} candles")
@@ -121,4 +122,150 @@ class BacktestEngine:
         
         logger.info(f"Backtest complete. {len(trades)} trades executed.")
         
+        return BacktestResults(trades=trades, initial_capital=self.initial_capital)
+
+    def run_python(self, loader: TickDataLoader) -> BacktestResults:
+        """Run backtest using Python strategy logic (slower but supports complex logic)."""
+        from ..data.converter import TickToOHLCConverter
+        from ..strategy.base import ExitContext
+        from ..indicators import ATR, RSI, Momentum, BollingerBands
+        from ..core.types import Position, SignalType, Trade, Side
+        
+        logger.info(f"Running Python-based backtest on {len(loader):,} ticks...")
+        
+        # Tools
+        converter = TickToOHLCConverter(self.timeframe_seconds)
+        
+        # Indicators
+        bb = BollingerBands(period=self.bb_period, deviation=self.bb_dev)
+        atr = ATR(period=14)
+        rsi = RSI(period=14)
+        momentum = Momentum(period=10)
+        
+        # State
+        trades = []
+        current_position: Optional[Position] = None
+        
+        # Indicator state
+        last_bb_result = None
+        last_candle_close = 0.0
+        last_atr = None
+        last_rsi = None
+        last_momentum = None
+        
+        count = 0
+        total = len(loader)
+        
+        for tick in loader:
+            count += 1
+            if count % 1000000 == 0:
+                logger.info(f"Processed {count:,}/{total:,} ticks...")
+            
+            # Update candles
+            completed_candle = converter.process_tick(tick)
+            
+            # If candle closed, update indicators
+            if completed_candle:
+                # Update indicators
+                bb_res = bb.update(completed_candle.close)
+                # Need High/Low/Close for ATR
+                atr_val = atr.update_ohlc(completed_candle.high, completed_candle.low, completed_candle.close)
+                rsi_val = rsi.update(completed_candle.close)
+                mom_val = momentum.update(completed_candle.close)
+                
+                # Update state
+                last_bb_result = bb_res
+                last_candle_close = completed_candle.close
+                # ATR returns value directly? Let's assume so or check return type
+                # Based on usage in environment.py: 
+                # self.atr.update_ohlc(...) -> seems to update internal state.
+                # Use accessing internal state if needed, but let's try to use returned value or internal property
+                # Checking atr.py would be safer but let's assume standard behavior:
+                # If update returns None (not ready), we keep None.
+                if atr_val is not None: last_atr = atr_val
+                if rsi_val is not None: last_rsi = rsi_val
+                if mom_val is not None: last_momentum = mom_val
+                
+                # Check ENTRY if no position (Dark Venus Entry Logic)
+                if current_position is None and last_bb_result is not None:
+                     can_long = self.config.trading.direction in ["long_only", "both"]
+                     can_short = self.config.trading.direction in ["short_only", "both"]
+                     
+                     prev_close = last_candle_close
+                     prev_upper = last_bb_result.upper
+                     prev_lower = last_bb_result.lower
+                     
+                     if self.config.trading.bb_strategy == "sell_above_buy_below":
+                          # Buy if Close < Lower
+                          if can_long and prev_close < prev_lower:
+                               entry_price = tick.ask
+                               sl = entry_price - self.sl_distance
+                               current_position = Position(
+                                   side=Side.LONG,
+                                   entry_price=entry_price,
+                                   entry_time=tick.timestamp,
+                                   size=self.lot_size,
+                                   stop_loss=sl
+                               )
+                          # Sell if Close > Upper
+                          elif can_short and prev_close > prev_upper:
+                               entry_price = tick.bid
+                               sl = entry_price + self.sl_distance
+                               current_position = Position(
+                                   side=Side.SHORT,
+                                   entry_price=entry_price,
+                                   entry_time=tick.timestamp,
+                                   size=self.lot_size,
+                                   stop_loss=sl
+                               )
+            
+            # Check EXIT if in position (Every Tick)
+            if current_position:
+                 # Current prices
+                 if current_position.side == Side.LONG:
+                     current_price = tick.bid
+                 else:
+                     current_price = tick.ask
+                 
+                 context = ExitContext(
+                     position=current_position,
+                     current_tick=tick,
+                     current_candle=None, # Incomplete candle not available
+                     bb_upper=last_bb_result.upper if last_bb_result else None,
+                     bb_middle=last_bb_result.middle if last_bb_result else None,
+                     bb_lower=last_bb_result.lower if last_bb_result else None,
+                     bb_percent_b=last_bb_result.percent_b if last_bb_result else None,
+                     atr=last_atr,
+                     rsi=last_rsi,
+                     momentum=last_momentum
+                 )
+                 
+                 signal = self.exit_strategy.should_exit(context)
+                 if signal:
+                      # Execute Exit
+                      if current_position.side == Side.LONG:
+                           exit_price = tick.bid
+                           pnl_points = exit_price - current_position.entry_price
+                      else:
+                           exit_price = tick.ask
+                           pnl_points = current_position.entry_price - exit_price
+                      
+                      pnl = pnl_points * self.lot_size * 100 # Approx Value
+                      
+                      trades.append(Trade(
+                          side=current_position.side,
+                          entry_price=current_position.entry_price,
+                          exit_price=exit_price,
+                          entry_time=current_position.entry_time,
+                          exit_time=tick.timestamp,
+                          size=self.lot_size,
+                          pnl=pnl,
+                          pnl_points=pnl_points,
+                          exit_reason=signal.reason
+                      ))
+                      
+                      current_position = None
+                      self.exit_strategy.reset()
+
+        logger.info(f"Python backtest complete. {len(trades)} trades executed.")
         return BacktestResults(trades=trades, initial_capital=self.initial_capital)

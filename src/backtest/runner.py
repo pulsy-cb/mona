@@ -24,10 +24,12 @@ def setup_logging(verbose: bool = False) -> None:
 def run_backtest(
     data_path: Path,
     strategy_name: str = "original",
-    sl_points: float = 300,
-    trail_activation: float = 200,
-    trail_offset: float = 100,
-    model_path: str | None = None
+    sl_points: float = 200,
+    trail_activation: float = 50,
+    trail_offset: float = 10,
+    model_path: str | None = None,
+    sample_ratio: float = 1.0,
+    max_rows: int | None = None
 ) -> BacktestResults:
     """Run backtest with specified parameters."""
     # Create config
@@ -37,20 +39,41 @@ def run_backtest(
         trail_offset=trail_offset
     )
     
-    # Load tick data
+    # Load tick data with memory optimization
     logging.info(f"Loading tick data from {data_path}...")
-    loader = TickDataLoader(data_path).load()
+    loader = TickDataLoader(
+        data_path, 
+        sample_ratio=sample_ratio,
+        max_rows=max_rows
+    ).load()
     logging.info(f"Loaded {len(loader):,} ticks")
     logging.info(f"Date range: {loader.date_range[0]} to {loader.date_range[1]}")
     
-    # Create exit strategy (for reference, engine uses its own fast logic)
-    exit_strategy = OriginalTrailingStop(config.trailing)
+    # Create exit strategy
+    use_numba = False
+    
+    if strategy_name == "heuristic":
+        # Create config for heuristic
+        heuristic_config = HeuristicConfig(
+            trailing=config.trailing,
+            # Using default params for now, could be exposed to CLI
+        )
+        exit_strategy = HeuristicExit(heuristic_config)
+        use_numba = False  # Heuristic requires Python engine for complex logic
+    else:
+        # Original strategy
+        exit_strategy = OriginalTrailingStop(config.trailing)
+        use_numba = True  # Original logic is supported by Numba engine
     
     # Create and run engine
     engine = BacktestEngine(config, exit_strategy)
     
-    logging.info(f"Running backtest with {strategy_name} exit strategy...")
-    results = engine.run(loader)
+    if use_numba:
+        logging.info(f"Running Numba-optimized backtest with {strategy_name} strategy...")
+        results = engine.run(loader)
+    else:
+        logging.info(f"Running Python-based backtest with {strategy_name} strategy (slower)...")
+        results = engine.run_python(loader)
     
     return results
 
@@ -60,11 +83,16 @@ def main():
     parser = argparse.ArgumentParser(description="Run tick-by-tick backtest")
     parser.add_argument("--data", "-d", type=Path, default=Path("XAUUSD.parquet"))
     parser.add_argument("--strategy", "-s", choices=["original", "heuristic", "ml"], default="original")
-    parser.add_argument("--sl", type=float, default=300)
-    parser.add_argument("--activation", type=float, default=200)
-    parser.add_argument("--offset", type=float, default=100)
+    parser.add_argument("--sl", type=float, default=200)
+    parser.add_argument("--activation", type=float, default=50)
+    parser.add_argument("--offset", type=float, default=10)
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--verbose", "-v", action="store_true")
+    # Memory optimization options
+    parser.add_argument("--sample", type=float, default=1.0,
+                        help="Sample ratio (0.0-1.0). Use 0.1 for 10%% of data. Default: 1.0 (all)")
+    parser.add_argument("--max-rows", type=int, default=None,
+                        help="Maximum rows to load. E.g., 5000000 for 5M ticks.")
     
     args = parser.parse_args()
     setup_logging(args.verbose)
@@ -75,7 +103,9 @@ def main():
         sl_points=args.sl,
         trail_activation=args.activation,
         trail_offset=args.offset,
-        model_path=args.model
+        model_path=args.model,
+        sample_ratio=args.sample,
+        max_rows=args.max_rows
     )
     
     results.print_summary()
