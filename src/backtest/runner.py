@@ -28,6 +28,7 @@ def run_backtest(
     trail_activation: float = 50,
     trail_offset: float = 10,
     model_path: str | None = None,
+    candle_only: bool = False,
     sample_ratio: float = 1.0,
     max_rows: int | None = None
 ) -> BacktestResults:
@@ -60,6 +61,18 @@ def run_backtest(
         )
         exit_strategy = HeuristicExit(heuristic_config)
         use_numba = False  # Heuristic requires Python engine for complex logic
+    elif strategy_name == "ml":
+        # ML strategy
+        from ..ml.exit_strategy import MLExitStrategy
+        if not model_path:
+            logging.warning("No model path provided for ML strategy, will fallback to trailing stop")
+        
+        exit_strategy = MLExitStrategy(
+            trailing_config=config.trailing,
+            model_path=model_path,
+            candle_only=candle_only
+        )
+        use_numba = False  # ML requires Python engine for model inference
     else:
         # Original strategy
         exit_strategy = OriginalTrailingStop(config.trailing)
@@ -93,6 +106,8 @@ def main():
                         help="Sample ratio (0.0-1.0). Use 0.1 for 10%% of data. Default: 1.0 (all)")
     parser.add_argument("--max-rows", type=int, default=None,
                         help="Maximum rows to load. E.g., 5000000 for 5M ticks.")
+    parser.add_argument("--candle-only", action="store_true", 
+                        help="For ML strategy: only check model on candle closes (faster)")
     
     args = parser.parse_args()
     setup_logging(args.verbose)
@@ -104,6 +119,7 @@ def main():
         trail_activation=args.activation,
         trail_offset=args.offset,
         model_path=args.model,
+        candle_only=args.candle_only,
         sample_ratio=args.sample,
         max_rows=args.max_rows
     )

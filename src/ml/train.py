@@ -191,13 +191,17 @@ def train_model(
     logging_callback = LoggingCallback(eval_freq=eval_freq)
     
     # Create and train model
-    # Detect GPU
+    # For MLP policies, CPU is actually faster than GPU due to:
+    # 1. Small network = minimal GPU benefit
+    # 2. Data transfer overhead CPU <-> GPU
+    # 3. Environment runs on CPU anyway
+    # See: https://github.com/DLR-RM/stable-baselines3/issues/1245
     import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        logging.info(f"🚀 GPU detected: {torch.cuda.get_device_name(0)}")
+    device = "cpu"  # Force CPU for MLP policy (faster than GPU for small networks)
+    if torch.cuda.is_available():
+        logging.info(f"ℹ️ GPU available ({torch.cuda.get_device_name(0)}) but using CPU for MLP policy (faster)")
     else:
-        logging.info("⚠️ No GPU detected, using CPU")
+        logging.info("ℹ️ Using CPU")
     
     logging.info("Creating PPO model...")
     model = PPO(

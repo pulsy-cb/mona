@@ -19,7 +19,8 @@ class MLExitStrategy(BaseExitStrategy):
     def __init__(
         self,
         trailing_config: TrailingStopConfig,
-        model_path: Optional[Path | str] = None
+        model_path: Optional[Path | str] = None,
+        candle_only: bool = False
     ):
         """
         Initialize ML exit strategy.
@@ -27,10 +28,13 @@ class MLExitStrategy(BaseExitStrategy):
         Args:
             trailing_config: Base trailing stop config (for fallback)
             model_path: Path to trained model
+            candle_only: If True, only call ML model on candle closes (faster).
+                         If False (default), call ML model on every tick.
         """
         self.trailing_config = trailing_config
         self.model_path = Path(model_path) if model_path else None
         self.model = None
+        self.candle_only = candle_only
         self.feature_extractor = FeatureExtractor(
             sl_points=trailing_config.stop_loss_points
         )
@@ -70,10 +74,15 @@ class MLExitStrategy(BaseExitStrategy):
             return price >= position.entry_price + sl_distance
     
     def should_exit(self, context: ExitContext) -> Optional[Signal]:
-        """Determine if should exit using ML model."""
+        """
+        Determine if should exit using ML model.
+        
+        If candle_only=True: Model is only called on candle closes (faster).
+        If candle_only=False: Model is called on every tick (default, more accurate).
+        """
         tick = context.current_tick
         
-        # Always check stop loss first (safety)
+        # Always check stop loss first (safety) - runs every tick
         if self._check_stop_loss(context):
             return Signal(
                 type=SignalType.EXIT,
@@ -81,6 +90,11 @@ class MLExitStrategy(BaseExitStrategy):
                 timestamp=tick.timestamp,
                 reason="fixed_stop_loss"
             )
+        
+        # OPTIONAL OPTIMIZATION: Only call ML model on candle close
+        if self.candle_only and context.current_candle is None:
+            # Between candles - just check trailing stop as safety
+            return self._check_trailing_stop(context)
         
         # If no model, use simple trailing stop
         if self.model is None:
@@ -99,6 +113,53 @@ class MLExitStrategy(BaseExitStrategy):
                 timestamp=tick.timestamp,
                 reason="ml_exit"
             )
+        
+        return None
+    
+    def _check_trailing_stop(self, context: ExitContext) -> Optional[Signal]:
+        """Quick trailing stop check without ML - for between-candle ticks."""
+        from ..core.types import Side
+        
+        position = context.position
+        price = context.current_price
+        tick = context.current_tick
+        point = 0.01
+        
+        trail_activation = self.trailing_config.activation_points * point
+        trail_offset = self.trailing_config.trail_offset_points * point
+        
+        if position.side == Side.LONG:
+            if self._highest_since_entry is None:
+                self._highest_since_entry = tick.bid
+            else:
+                self._highest_since_entry = max(self._highest_since_entry, tick.bid)
+            
+            profit = self._highest_since_entry - position.entry_price
+            if profit >= trail_activation:
+                trailing_sl = self._highest_since_entry - trail_offset
+                if price <= trailing_sl:
+                    return Signal(
+                        type=SignalType.EXIT,
+                        price=price,
+                        timestamp=tick.timestamp,
+                        reason="trailing_stop"
+                    )
+        else:
+            if self._lowest_since_entry is None:
+                self._lowest_since_entry = tick.ask
+            else:
+                self._lowest_since_entry = min(self._lowest_since_entry, tick.ask)
+            
+            profit = position.entry_price - self._lowest_since_entry
+            if profit >= trail_activation:
+                trailing_sl = self._lowest_since_entry + trail_offset
+                if price >= trailing_sl:
+                    return Signal(
+                        type=SignalType.EXIT,
+                        price=price,
+                        timestamp=tick.timestamp,
+                        reason="trailing_stop"
+                    )
         
         return None
     

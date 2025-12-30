@@ -230,7 +230,7 @@ class BacktestEngine:
                  context = ExitContext(
                      position=current_position,
                      current_tick=tick,
-                     current_candle=None, # Incomplete candle not available
+                     current_candle=completed_candle,  # Pass completed candle (None between candles)
                      bb_upper=last_bb_result.upper if last_bb_result else None,
                      bb_middle=last_bb_result.middle if last_bb_result else None,
                      bb_lower=last_bb_result.lower if last_bb_result else None,

@@ -102,12 +102,19 @@ class TickDataLoader:
         
         # Calculate how many rows to load
         target_rows = total_rows
-        if self.max_rows and self.max_rows < total_rows:
-            target_rows = self.max_rows
-        if self.sample_ratio < 1.0:
-            target_rows = min(target_rows, int(total_rows * self.sample_ratio))
+        use_sampling = False
         
-        logger.info(f"Target: {target_rows:,} rows")
+        if self.sample_ratio < 1.0:
+            target_rows = int(total_rows * self.sample_ratio)
+            use_sampling = True
+        
+        if self.max_rows and self.max_rows < target_rows:
+            target_rows = self.max_rows
+            # If user wants max_rows but didn't ask for sampling ratio, 
+            # we should effectively take the 'head' (contiguous), not sample.
+            # Only use sampling if explicitly requested via sample_ratio.
+        
+        logger.info(f"Target: {target_rows:,} rows (Sampling: {use_sampling})")
         
         # Pre-allocate arrays
         timestamps = np.zeros(target_rows, dtype=np.int64)
@@ -116,12 +123,13 @@ class TickDataLoader:
         bid_vols = np.zeros(target_rows, dtype=np.float32)
         ask_vols = np.zeros(target_rows, dtype=np.float32)
         
-        # Calculate step for sampling
-        step = max(1, total_rows // target_rows) if target_rows < total_rows else 1
+        # Calculate step for sampling ONLY if requested
+        step = 1
+        if use_sampling:
+            step = max(1, total_rows // target_rows)
         
         # Load row groups one at a time
         current_idx = 0
-        source_idx = 0
         
         for rg_idx in range(num_row_groups):
             if current_idx >= target_rows:

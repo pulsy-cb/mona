@@ -551,14 +551,38 @@ class FastTradingEnv(gym.Env):
         if self._position is not None:
             if self._check_stop_loss(idx):
                 pnl = self._close_position(idx)
-                reward = pnl
+                # Penalize hitting stop loss HARD to encourage early exit
+                reward = pnl - 5.0 
                 info['exit_reason'] = 'stop_loss'
             elif action == 1:  # EXIT
                 pnl = self._close_position(idx)
-                reward = pnl
+                if pnl > 0:
+                    # Boost reward for taking profit proactively
+                    reward = pnl * 1.5
+                else:
+                    # Standard reward for loss (better than SL penalty)
+                    reward = pnl
                 info['exit_reason'] = 'agent_exit'
             else:  # HOLD
-                reward = -0.001
+                # Smart Holding Reward:
+                # If Profitable: Encourage holding (+0.001) -> "Let winners run"
+                # If Losing: Mild pressure (-0.001) -> "Don't hold losers forever"
+                
+                # Get current price to check unrealized PnL
+                bid = float(self.bids[idx])
+                ask = float(self.asks[idx])
+                
+                if self._position.side == Side.LONG:
+                    current_price = bid
+                else:
+                    current_price = ask
+                    
+                unrealized_pnl = self._position.unrealized_pnl_points(current_price) * self._position.size * 100
+                
+                if unrealized_pnl > 0:
+                    reward = 0.001
+                else:
+                    reward = -0.001
         
         # If not in position, find next entry
         if self._position is None and completed:
