@@ -21,10 +21,12 @@ class Features:
     
     # Volatility features
     atr_normalized: float  # Current ATR / average ATR
+    volatility_10: float  # Std dev of last 10 ticks (normalized)
     
     # Momentum features  
     rsi_normalized: float  # (RSI - 50) / 50, range -1 to 1
     momentum_normalized: float  # Momentum / ATR
+    velocity_5: float  # Price change rate over 5 ticks (normalized)
     
     # Price features
     distance_to_sl: float  # Distance to SL / SL distance (0-1)
@@ -39,8 +41,10 @@ class Features:
             self.bb_percent_b,
             self.bb_bandwidth_normalized,
             self.atr_normalized,
+            self.volatility_10,
             self.rsi_normalized,
             self.momentum_normalized,
+            self.velocity_5,
             self.distance_to_sl,
             self.distance_to_entry,
             self.is_in_profit
@@ -49,7 +53,7 @@ class Features:
     @staticmethod
     def feature_dim() -> int:
         """Return feature dimension."""
-        return 10
+        return 12  # Was 10, now +2 for volatility_10 and velocity_5
 
 
 class FeatureExtractor:
@@ -77,6 +81,10 @@ class FeatureExtractor:
         self._avg_bandwidth = avg_bandwidth or 0.01
         self._atr_ema_alpha = 0.01
         self._bandwidth_ema_alpha = 0.01
+        
+        # Price buffer for volatility and velocity calculation
+        self._price_buffer: list[float] = []
+        self._buffer_size = 10
     
     def _update_running_averages(self, context: ExitContext) -> None:
         """Update running averages for normalization."""
@@ -160,14 +168,34 @@ class FeatureExtractor:
         
         distance_to_entry = pnl_normalized  # Already normalized
         
+        # Update price buffer for volatility/velocity calculation
+        self._price_buffer.append(current_price)
+        if len(self._price_buffer) > self._buffer_size:
+            self._price_buffer.pop(0)
+        
+        # Volatility feature: std dev of recent prices (normalized by ATR)
+        volatility_10 = 0.0
+        if len(self._price_buffer) >= 5 and self._avg_atr > 0:
+            volatility_10 = np.std(self._price_buffer) / self._avg_atr
+            volatility_10 = np.clip(volatility_10, 0.0, 3.0)
+        
+        # Velocity feature: price change rate (direction + magnitude)
+        velocity_5 = 0.0
+        if len(self._price_buffer) >= 5 and self._avg_atr > 0:
+            price_change = self._price_buffer[-1] - self._price_buffer[-5]
+            velocity_5 = price_change / self._avg_atr
+            velocity_5 = np.clip(velocity_5, -3.0, 3.0)
+        
         return Features(
             pnl_normalized=float(pnl_normalized),
             time_in_trade=float(time_normalized),
             bb_percent_b=float(bb_percent_b),
             bb_bandwidth_normalized=float(bandwidth_normalized),
             atr_normalized=float(atr_normalized),
+            volatility_10=float(volatility_10),
             rsi_normalized=float(rsi_normalized),
             momentum_normalized=float(momentum_normalized),
+            velocity_5=float(velocity_5),
             distance_to_sl=float(distance_to_sl),
             distance_to_entry=float(distance_to_entry),
             is_in_profit=float(is_in_profit)

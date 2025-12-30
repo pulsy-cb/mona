@@ -139,6 +139,29 @@ def main():
     print("-" * 40)
     for reason, stats in sorted(exit_reasons.items()):
         print(f"  {reason}: {stats['count']} trades, {stats['pnl']:.2f}€")
+    
+    # Export trades to CSV for analysis
+    import pandas as pd
+    from datetime import datetime as dt
+    
+    trades_data = []
+    for t in results.trades:
+        trades_data.append({
+            'entry_time': t.entry_time,
+            'exit_time': t.exit_time,
+            'side': t.side.value,
+            'entry_price': t.entry_price,
+            'exit_price': t.exit_price,
+            'pnl': t.pnl,
+            'pnl_points': t.pnl_points,
+            'exit_reason': t.exit_reason
+        })
+    
+    if trades_data:
+        df = pd.DataFrame(trades_data)
+        csv_path = f"backtest_trades_{dt.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        df.to_csv(csv_path, index=False)
+        print(f"\n📊 Trades exported to {csv_path}")
 
 
 if __name__ == "__main__":

@@ -208,12 +208,16 @@ def train_model(
         "MlpPolicy",
         train_env,
         learning_rate=learning_rate,
-        n_steps=n_steps,
+        n_steps=2048,         # Increased for longer sequence visibility
         batch_size=batch_size,
         n_epochs=10,
         gamma=0.99,
+        gae_lambda=0.95,      # Generalized Advantage Estimation
+        ent_coef=0.01,        # Force exploration (anti-lazy behavior)
+        vf_coef=0.5,          # Value function coefficient
+        clip_range=0.2,
         verbose=1,
-        device=device,  # Use GPU if available
+        device=device,
         tensorboard_log=str(output_path.parent / "tensorboard")
     )
     

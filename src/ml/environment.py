@@ -365,6 +365,16 @@ class FastTradingEnv(gym.Env):
         self._last_candle: Optional[OHLC] = None
         self._episode_trades = []
         self._steps_in_trade = 0
+        
+        # Visibility: Episode history for debugging/analysis
+        self.history = []
+        
+        # Dense reward tracking
+        self._prev_unrealized_pnl = 0.0
+        
+        # Oracle system: Track optimal exit for efficiency calculation
+        self._entry_idx = None
+        self._max_potential_pnl = 0.0
     
     def _make_tick(self, idx: int) -> Tick:
         """Create a Tick object from arrays at given index (only when needed)."""
@@ -428,6 +438,12 @@ class FastTradingEnv(gym.Env):
         self._episode_trades = []
         self._steps_in_trade = 0
         
+        # Reset visibility and oracle tracking
+        self.history = []
+        self._prev_unrealized_pnl = 0.0
+        self._entry_idx = None
+        self._max_potential_pnl = 0.0
+        
         # Warm up indicators
         warmup_ticks = min(1000, self._tick_idx)
         for i in range(self._tick_idx - warmup_ticks, self._tick_idx):
@@ -486,6 +502,11 @@ class FastTradingEnv(gym.Env):
         )
         self.entry_strategy.set_has_position(True)
         self._steps_in_trade = 0
+        
+        # Oracle: Track entry for efficiency calculation
+        self._entry_idx = idx
+        self._max_potential_pnl = 0.0
+        self._prev_unrealized_pnl = 0.0
     
     def _close_position(self, idx: int) -> float:
         """Close position and return P&L."""
@@ -523,11 +544,12 @@ class FastTradingEnv(gym.Env):
             return ask >= self._position.stop_loss
     
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
-        """Execute one step in the environment."""
+        """Execute one step in the environment with dense reward shaping."""
         reward = 0.0
         terminated = False
         truncated = False
         info = {}
+        current_unrealized_pnl = 0.0
         
         if self._tick_idx >= self.n_ticks:
             terminated = True
@@ -547,42 +569,78 @@ class FastTradingEnv(gym.Env):
             self.rsi.update(completed.close)
             self.momentum.update(completed.close)
         
-        # Handle position
+        # Handle position with DENSE REWARD SHAPING
         if self._position is not None:
+            # Get current price
+            bid = float(self.bids[idx])
+            ask = float(self.asks[idx])
+            
+            if self._position.side == Side.LONG:
+                current_price = bid
+            else:
+                current_price = ask
+            
+            # Calculate current unrealized PnL
+            current_unrealized_pnl = self._position.unrealized_pnl_points(current_price) * self._position.size * 100
+            
+            # ORACLE: Track maximum potential profit
+            if self._entry_idx is not None:
+                if self._position.side == Side.LONG:
+                    max_price = float(np.max(self.bids[self._entry_idx:idx+1]))
+                    potential = (max_price - self._position.entry_price) * self._position.size * 100
+                else:
+                    min_price = float(np.min(self.asks[self._entry_idx:idx+1]))
+                    potential = (self._position.entry_price - min_price) * self._position.size * 100
+                self._max_potential_pnl = max(self._max_potential_pnl, potential if potential > 0 else 0)
+            
+            # DENSE REWARD: Incremental change in PnL (what we gained/lost THIS tick)
+            step_reward = current_unrealized_pnl - self._prev_unrealized_pnl
+            self._prev_unrealized_pnl = current_unrealized_pnl
+            
+            # SMART TIME PENALTY: Only penalize when LOSING, reward patience when winning
+            if current_unrealized_pnl > 0:
+                time_reward = 0.001  # Small bonus for holding winners
+            else:
+                time_penalty = -0.002  # Lighter penalty (was -0.005)
+                time_reward = time_penalty
+            
+            # MINIMUM HOLD TIME: Prevent panicking exits
+            min_hold_steps = 50  # Must hold at least 50 ticks before allowing exit
+            
             if self._check_stop_loss(idx):
                 pnl = self._close_position(idx)
                 # Penalize hitting stop loss HARD to encourage early exit
-                reward = pnl - 5.0 
+                reward = pnl - 5.0
                 info['exit_reason'] = 'stop_loss'
+                info['efficiency'] = 0.0  # Worst efficiency
             elif action == 1:  # EXIT
-                pnl = self._close_position(idx)
-                if pnl > 0:
-                    # Boost reward for taking profit proactively
-                    reward = pnl * 1.5
+                # Block early exits - treat as HOLD if too early
+                if self._steps_in_trade < min_hold_steps:
+                    # Force HOLD, apply penalty for trying to exit too early
+                    reward = step_reward + time_reward - 0.1  # Penalty for panic
+                    info['blocked_exit'] = True
                 else:
-                    # Standard reward for loss (better than SL penalty)
+                    pnl = self._close_position(idx)
                     reward = pnl
-                info['exit_reason'] = 'agent_exit'
-            else:  # HOLD
-                # Smart Holding Reward:
-                # If Profitable: Encourage holding (+0.001) -> "Let winners run"
-                # If Losing: Mild pressure (-0.001) -> "Don't hold losers forever"
-                
-                # Get current price to check unrealized PnL
-                bid = float(self.bids[idx])
-                ask = float(self.asks[idx])
-                
-                if self._position.side == Side.LONG:
-                    current_price = bid
-                else:
-                    current_price = ask
                     
-                unrealized_pnl = self._position.unrealized_pnl_points(current_price) * self._position.size * 100
-                
-                if unrealized_pnl > 0:
-                    reward = 0.001
-                else:
-                    reward = -0.001
+                    # ORACLE BONUS: Reward efficiency (capturing potential)
+                    if self._max_potential_pnl > 0:
+                        efficiency = max(0, pnl) / self._max_potential_pnl
+                        efficiency_bonus = efficiency * 5.0  # Increased from 2.0
+                        reward += efficiency_bonus
+                        info['efficiency'] = efficiency
+                    else:
+                        info['efficiency'] = 1.0 if pnl >= 0 else 0.0
+                    
+                    # Bonus for patient exits (held longer)
+                    patience_bonus = min(self._steps_in_trade / 500, 1.0)  # Up to +1 for holding 500 ticks
+                    reward += patience_bonus
+                    
+                    info['exit_reason'] = 'agent_exit'
+                    info['max_potential'] = self._max_potential_pnl
+            else:  # HOLD
+                # Dense reward: incremental PnL change + smart time reward
+                reward = step_reward + time_reward
         
         # If not in position, find next entry
         if self._position is None and completed:
@@ -601,8 +659,26 @@ class FastTradingEnv(gym.Env):
         info['trades'] = len(self._episode_trades)
         info['total_pnl'] = sum(self._episode_trades)
         
+        # VISIBILITY: Record step in history
+        self.history.append({
+            'step': idx,
+            'price': float(self.bids[idx]),
+            'action': action,
+            'reward': reward,
+            'unrealized_pnl': current_unrealized_pnl,
+            'is_in_position': 1 if self._position else 0,
+            'exit_reason': info.get('exit_reason', None)
+        })
+        
         return obs, reward, terminated, truncated, info
     
     def render(self) -> None:
-        """Render current state (not implemented)."""
-        pass
+        """Render current state - display last decision."""
+        if len(self.history) > 0:
+            h = self.history[-1]
+            action_str = 'EXIT' if h['action'] == 1 else 'HOLD'
+            pos_str = 'IN_POS' if h['is_in_position'] else 'NO_POS'
+            exit_str = f" [{h['exit_reason']}]" if h['exit_reason'] else ""
+            print(f"Step {h['step']:>7} | Price: {h['price']:.2f} | "
+                  f"{pos_str} | Action: {action_str} | "
+                  f"Reward: {h['reward']:+.4f} | PnL: {h['unrealized_pnl']:+.2f}{exit_str}")
