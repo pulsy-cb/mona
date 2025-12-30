@@ -53,10 +53,12 @@ def train_model(
     output_path: Path,
     total_timesteps: int = 100000,
     learning_rate: float = 3e-4,
-    n_steps: int = 256,  # Reduced from 2048 for faster iteration
+    n_steps: int = 256,
     batch_size: int = 64,
     max_rows: int | None = None,
-    n_envs: int | None = None
+    n_envs: int | None = None,
+    use_precomputed: bool = True,
+    force_recompute: bool = False
 ) -> None:
     """
     Train the PPO model for exit optimization.
@@ -68,6 +70,10 @@ def train_model(
         learning_rate: Learning rate
         n_steps: Steps per update
         batch_size: Batch size
+        max_rows: Maximum rows to load (for testing)
+        n_envs: Number of parallel environments
+        use_precomputed: Use precomputed features for 10-50x speedup
+        force_recompute: Force recomputation of features even if cache exists
     """
     try:
         from stable_baselines3 import PPO
@@ -99,16 +105,6 @@ def train_model(
             # Log progress after each rollout
             pass
     
-    from .environment import FastTradingEnv
-    
-    logging.info("Loading tick data...")
-    loader = TickDataLoader(data_path, max_rows=max_rows).load()
-    
-    # Get numpy arrays directly - MUCH faster than creating Tick objects
-    arrays = loader.get_arrays()
-    total_ticks = len(arrays.bids)
-    logging.info(f"Loaded {total_ticks:,} ticks as numpy arrays")
-    
     # Create config
     config = Config.from_pine_params(
         sl_points=300,
@@ -116,35 +112,122 @@ def train_model(
         trail_offset=100
     )
     
-    # Split data for training and evaluation (use indices, not copies)
-    split_idx = int(total_ticks * 0.8)
+    # ========================================
+    # PRECOMPUTED FEATURES PATH (10-50x faster!)
+    # ========================================
+    if use_precomputed:
+        from .environment import PrecomputedTradingEnv
+        from .prepare_training_data import prepare_training_data
+        
+        # Determine cache file path
+        cache_file = output_path.parent / f"{data_path.stem}_preprocessed.npz"
+        
+        logging.info("="*60)
+        logging.info("USING PRECOMPUTED FEATURES (10-50x speedup!)")
+        logging.info("="*60)
+        
+        # Check if we need to recompute
+        if force_recompute or not cache_file.exists():
+            logging.info(f"Preprocessing {data_path}...")
+            logging.info("This will take a few minutes but only needs to be done once.")
+            
+            preprocessed = prepare_training_data(
+                parquet_file=data_path,
+                timeframe="1s",
+                cache_file=cache_file,
+                force_recompute=force_recompute
+            )
+        else:
+            logging.info(f"Loading cached preprocessed data from {cache_file}")
+            import numpy as np
+            data = np.load(cache_file, allow_pickle=True)
+            preprocessed = {
+                'timestamps': data['timestamps'],
+                'bids': data['bids'],
+                'asks': data['asks'],
+                'features': data['features'],
+                'feature_names': data['feature_names'].tolist()
+            }
+        
+        total_ticks = len(preprocessed['bids'])
+        logging.info(f"Loaded {total_ticks:,} ticks with {len(preprocessed['feature_names'])} precomputed features")
+        logging.info(f"Features: {preprocessed['feature_names']}")
+        
+        # Split data for training and evaluation
+        split_idx = int(total_ticks * 0.8)
+        logging.info(f"Training ticks: {split_idx:,}")
+        logging.info(f"Evaluation ticks: {total_ticks - split_idx:,}")
+        
+        # Split arrays
+        train_timestamps = preprocessed['timestamps'][:split_idx]
+        train_bids = preprocessed['bids'][:split_idx]
+        train_asks = preprocessed['asks'][:split_idx]
+        train_features = preprocessed['features'][:split_idx]
+        
+        eval_timestamps = preprocessed['timestamps'][split_idx:]
+        eval_bids = preprocessed['bids'][split_idx:]
+        eval_asks = preprocessed['asks'][split_idx:]
+        eval_features = preprocessed['features'][split_idx:]
+        
+        # Determine number of parallel environments
+        actual_n_envs = get_optimal_n_envs(n_envs)
+        logging.info(f"Using {actual_n_envs} parallel environments (detected {os.cpu_count()} CPUs)")
+        
+        # Create environment factory functions
+        def make_train_env():
+            return PrecomputedTradingEnv(
+                train_timestamps, train_bids, train_asks,
+                train_features, preprocessed['feature_names'],
+                config
+            )
+        
+        def make_eval_env():
+            return PrecomputedTradingEnv(
+                eval_timestamps, eval_bids, eval_asks,
+                eval_features, preprocessed['feature_names'],
+                config
+            )
     
-    # Create tick lists lazily only for the environment
-    logging.info(f"Training ticks: {split_idx:,}")
-    logging.info(f"Evaluation ticks: {total_ticks - split_idx:,}")
-    
-    # Split arrays for train/eval (no object conversion needed!)
-    train_timestamps = arrays.timestamps[:split_idx]
-    train_bids = arrays.bids[:split_idx]
-    train_asks = arrays.asks[:split_idx]
-    
-    eval_timestamps = arrays.timestamps[split_idx:]
-    eval_bids = arrays.bids[split_idx:]
-    eval_asks = arrays.asks[split_idx:]
-    
-    logging.info("Using FastTradingEnv - no Tick object conversion needed!")
-    
-    # Determine number of parallel environments
-    actual_n_envs = get_optimal_n_envs(n_envs)
-    logging.info(f"Using {actual_n_envs} parallel environments (detected {os.cpu_count()} CPUs)")
-    
-    # Create environment factory functions
-    # Note: Each env gets the same data but will start at different random positions
-    def make_train_env():
-        return FastTradingEnv(train_timestamps, train_bids, train_asks, config)
-    
-    def make_eval_env():
-        return FastTradingEnv(eval_timestamps, eval_bids, eval_asks, config)
+    # ========================================
+    # LEGACY PATH (FastTradingEnv)
+    # ========================================
+    else:
+        from .environment import FastTradingEnv
+        
+        logging.info("Loading tick data...")
+        loader = TickDataLoader(data_path, max_rows=max_rows).load()
+        
+        # Get numpy arrays directly
+        arrays = loader.get_arrays()
+        total_ticks = len(arrays.bids)
+        logging.info(f"Loaded {total_ticks:,} ticks as numpy arrays")
+        
+        # Split data for training and evaluation
+        split_idx = int(total_ticks * 0.8)
+        logging.info(f"Training ticks: {split_idx:,}")
+        logging.info(f"Evaluation ticks: {total_ticks - split_idx:,}")
+        
+        # Split arrays for train/eval
+        train_timestamps = arrays.timestamps[:split_idx]
+        train_bids = arrays.bids[:split_idx]
+        train_asks = arrays.asks[:split_idx]
+        
+        eval_timestamps = arrays.timestamps[split_idx:]
+        eval_bids = arrays.bids[split_idx:]
+        eval_asks = arrays.asks[split_idx:]
+        
+        logging.info("Using FastTradingEnv (legacy mode)")
+        
+        # Determine number of parallel environments
+        actual_n_envs = get_optimal_n_envs(n_envs)
+        logging.info(f"Using {actual_n_envs} parallel environments (detected {os.cpu_count()} CPUs)")
+        
+        # Create environment factory functions
+        def make_train_env():
+            return FastTradingEnv(train_timestamps, train_bids, train_asks, config)
+        
+        def make_eval_env():
+            return FastTradingEnv(eval_timestamps, eval_bids, eval_asks, config)
     
     # Create vectorized environments
     if actual_n_envs > 1:
@@ -234,7 +317,14 @@ def train_model(
     
     # Quick evaluation - run multiple episodes for better statistics
     logging.info("\nEvaluating final model...")
-    env = FastTradingEnv(eval_timestamps, eval_bids, eval_asks, config)
+    if use_precomputed:
+        env = PrecomputedTradingEnv(
+            eval_timestamps, eval_bids, eval_asks,
+            eval_features, preprocessed['feature_names'],
+            config
+        )
+    else:
+        env = FastTradingEnv(eval_timestamps, eval_bids, eval_asks, config)
     
     n_eval_episodes = 5
     all_rewards = []
@@ -312,9 +402,28 @@ def main():
         default=None,
         help="Number of parallel environments. Default: auto-detect (uses available CPUs - 2)"
     )
+    parser.add_argument(
+        "--use-precomputed",
+        action="store_true",
+        default=True,
+        help="Use precomputed features for 10-50x speedup (default: True)"
+    )
+    parser.add_argument(
+        "--no-precomputed",
+        action="store_true",
+        help="Disable precomputed features (use legacy FastTradingEnv)"
+    )
+    parser.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Force recomputation of features even if cache exists"
+    )
     
     args = parser.parse_args()
     setup_logging(args.verbose)
+    
+    # Handle precomputed flag
+    use_precomputed = args.use_precomputed and not args.no_precomputed
     
     train_model(
         data_path=args.data,
@@ -322,7 +431,9 @@ def main():
         total_timesteps=args.timesteps,
         learning_rate=args.lr,
         max_rows=args.max_rows,
-        n_envs=args.n_envs
+        n_envs=args.n_envs,
+        use_precomputed=use_precomputed,
+        force_recompute=args.force_recompute
     )
 
 

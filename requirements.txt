@@ -1,5 +1,6 @@
 # Core dependencies
 pandas
+pandas-ta>=0.3.14
 pyarrow
 numpy
 
