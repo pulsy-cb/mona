@@ -41,3 +41,8 @@ src/
 └── mt5/            # Connecteur MetaTrader 5
 ```
 # mona
+# Entraînement avec features pré-calculées (par défaut)
+python -m src.ml.train --data XAUUSD.parquet --timesteps 100000
+
+# Forcer le recalcul
+python -m src.ml.train --force-recompute
