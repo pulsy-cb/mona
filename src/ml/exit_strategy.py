@@ -6,7 +6,7 @@ from typing import Optional
 from ..core.types import Signal, SignalType
 from ..core.config import TrailingStopConfig
 from ..strategy.base import BaseExitStrategy, ExitContext
-from .features import FeatureExtractor
+from .simple_features import SimpleFeatureExtractor
 
 
 class MLExitStrategy(BaseExitStrategy):
@@ -14,6 +14,8 @@ class MLExitStrategy(BaseExitStrategy):
     Exit strategy using a trained RL model.
     
     Falls back to fixed stop loss if model not loaded.
+    
+    NOTE: Uses SimpleFeatureExtractor (9 features) to match PrecomputedTradingEnv.
     """
     
     def __init__(
@@ -35,7 +37,7 @@ class MLExitStrategy(BaseExitStrategy):
         self.model_path = Path(model_path) if model_path else None
         self.model = None
         self.candle_only = candle_only
-        self.feature_extractor = FeatureExtractor(
+        self.feature_extractor = SimpleFeatureExtractor(
             sl_points=trailing_config.stop_loss_points
         )
         
